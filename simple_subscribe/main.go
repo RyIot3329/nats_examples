@@ -1,46 +1,73 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"log"
-	"runtime"
-
 	"github.com/nats-io/nats.go"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
 )
 
 func printMsg(m *nats.Msg, i int) {
-	fmt.Printf("[#%d] Received on [%s]: '%s'", i, m.Subject, string(m.Data))
+	log.Printf("[#%d] Received on [%s]: '%s'", i, m.Subject, string(m.Data))
 }
 
 func main() {
 
-	url := "nats://127.0.0.1:4222"
-	if url == "" {
-		url = nats.DefaultURL
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		// listen for interrupts to exit gracefully
+		sigChannel := make(chan os.Signal, 1)
+		signal.Notify(sigChannel, os.Interrupt, syscall.SIGTERM)
+		<-sigChannel
+		close(sigChannel)
+		cancel()
+	}()
+
+	// register the consumer
+	go consumer(ctx, "hello.world")
+	go consumer(ctx, "goodbye.world")
+
+	<-ctx.Done()
+
+	log.Println("exiting gracefully")
+}
+
+func consumer(ctx context.Context, subj string) {
+
+	nc, err := nats.Connect("nats://127.0.0.1:4222")
+	if err != nil {
+		log.Fatal("Failed to connect to NATS server:", err)
+	}
+	defer nc.Close()
+
+	fmt.Println("Connected to NATS server on port 4222")
+
+	messages := make(chan *nats.Msg, 1000)
+
+	// we're subscribing to the subject
+	// and assigning our channel as reference to receive messages there
+	subscription, err := nc.ChanSubscribe(subj, messages)
+	if err != nil {
+		log.Fatal("Failed to subscribe to subject:", err)
 	}
 
-	nc, _ := nats.Connect(url)
+	defer func() {
+		subscription.Unsubscribe()
+		close(messages)
+	}()
 
-	defer nc.Drain()
+	log.Println("Subscribed to", subj)
 
-	i := 0
-	sbj := "hello.world"
-
-	nc.Subscribe(sbj, func(msg *nats.Msg) {
-		fmt.Println("got message")
-		i += 1
-		printMsg(msg, i)
-	})
-	nc.Flush()
-
-	if err := nc.LastError(); err != nil {
-		log.Fatal(err)
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("exiting from consumer")
+			return
+		case msg := <-messages:
+			log.Println("received", string(msg.Data))
+		}
 	}
-
-	log.Printf("Listening on [%s]", sbj)
-	// if *showTime {
-	// 	log.SetFlags(log.LstdFlags)
-	// }
-
-	runtime.Goexit()
 }
